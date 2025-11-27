@@ -1,0 +1,7 @@
+{
+  "name": "NomadLedger",
+  "description": "A minimalist, dark-mode PWA for tracking travel expenses with Firebase integration.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
