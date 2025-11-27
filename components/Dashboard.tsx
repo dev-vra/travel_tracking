@@ -3,7 +3,9 @@ import { User } from 'firebase/auth';
 import { logoutUser, getUserExpenses } from '../services/firebase';
 import { Expense, ExpenseCategory, CategorySummary } from '../types';
 import { PieChart, Pie, Cell, Tooltip } from 'recharts';
-import { LogOut, Plus, Receipt, Calendar, Download, Loader2, FilterX } from 'lucide-react';
+import { LogOut, Plus, Receipt, Calendar, Download, Loader2, FilterX, FileText } from 'lucide-react';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
 
 interface DashboardProps {
   user: User;
@@ -73,19 +75,23 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
         const csvRows = [headers.join(';')];
 
         for (const exp of filteredExpenses) {
-            // Formatação manual da data para DD/MM/AAAA para evitar que o new Date() 
-            // subtraia um dia devido ao fuso horário do navegador
-            const [ano, mes, dia] = exp.date.split('-');
-            const dataFormatada = `${dia}/${mes}/${ano}`;
+            // Formatação manual da data para DD/MM/AAAA
+            const dateParts = exp.date.split('-');
+            const dataFormatada = dateParts.length === 3 
+                ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` 
+                : exp.date;
             
             // Escapar aspas duplas na descrição
-            const descricaoSegura = `"${exp.description.replace(/"/g, '""')}"`;
+            const descricaoSegura = `"${(exp.description || '').replace(/"/g, '""')}"`;
+            
+            // Formatar valor (trocar ponto por vírgula para Excel PT-BR)
+            const valorFormatado = (exp.amount || 0).toFixed(2).replace('.', ',');
 
             const row = [
                 dataFormatada,
                 descricaoSegura,
                 exp.category,
-                exp.amount.toFixed(2).replace('.', ','), // Formato 10,50
+                valorFormatado, 
                 exp.currency,
                 exp.receiptUrl || ''
             ];
@@ -97,21 +103,110 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
         const blob = new Blob(['\uFEFF' + csvString], { type: 'text/csv;charset=utf-8;' });
         
         // Cria link de download
-        const url = URL.createObjectURL(blob);
+        const url = window.URL.createObjectURL(blob);
         const link = document.createElement("a");
         link.href = url;
-        link.download = `nomad_relatorio_${startDate || 'inicio'}_ate_${endDate || 'fim'}.csv`;
         
+        // Nome do arquivo seguro
+        const inicio = startDate || 'inicio';
+        const fim = endDate || 'fim';
+        link.download = `nomad_relatorio_${inicio}_ate_${fim}.csv`;
+        
+        // Forçar visibilidade oculta e anexar ao body
+        link.style.display = 'none';
         document.body.appendChild(link);
+        
         link.click();
         
-        // Limpeza
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
+        // Limpeza com DELAY
+        setTimeout(() => {
+            document.body.removeChild(link);
+            window.URL.revokeObjectURL(url);
+        }, 100);
 
     } catch (error) {
         console.error("Erro ao gerar CSV:", error);
-        alert("Ocorreu um erro ao gerar o arquivo. Verifique o console para mais detalhes.");
+        alert("Ocorreu um erro ao gerar o arquivo. Tente novamente.");
+    }
+  };
+
+  // Função para Gerar PDF
+  const generatePDF = () => {
+    try {
+      if (filteredExpenses.length === 0) {
+        alert("Não há despesas no período selecionado para exportar.");
+        return;
+      }
+
+      const doc = new jsPDF();
+
+      // Cabeçalho
+      doc.setFontSize(18);
+      doc.setTextColor(16, 185, 129); // Emerald 500
+      doc.text("NomadLedger - Relatório de Despesas", 14, 22);
+
+      doc.setFontSize(10);
+      doc.setTextColor(100);
+      const dataEmissao = new Date().toLocaleDateString('pt-BR');
+      doc.text(`Gerado em: ${dataEmissao} | Usuário: ${user.email}`, 14, 30);
+      
+      const periodoTexto = startDate && endDate 
+        ? `Período: ${startDate.split('-').reverse().join('/')} até ${endDate.split('-').reverse().join('/')}`
+        : "Período: Todo o histórico";
+      doc.text(periodoTexto, 14, 35);
+
+      doc.text(`Total Gasto: ${formatCurrency(totalSpent)}`, 14, 42);
+
+      // Preparar dados para tabela
+      const tableData = filteredExpenses.map(exp => {
+        const dateParts = exp.date.split('-');
+        const dataFormatada = dateParts.length === 3 
+            ? `${dateParts[2]}/${dateParts[1]}/${dateParts[0]}` 
+            : exp.date;
+
+        return [
+          dataFormatada,
+          exp.description,
+          exp.category,
+          `${exp.currency} ${exp.amount.toFixed(2)}`,
+          exp.receiptUrl ? 'Ver Link' : '-'
+        ];
+      });
+
+      // Gerar tabela
+      autoTable(doc, {
+        startY: 50,
+        head: [['Data', 'Descrição', 'Categoria', 'Valor', 'Comp.']],
+        body: tableData,
+        headStyles: { fillColor: [6, 78, 59], textColor: [255, 255, 255] }, // Emerald 900
+        alternateRowStyles: { fillColor: [240, 253, 244] }, // Emerald 50
+        styles: { fontSize: 9, cellPadding: 3 },
+        columnStyles: {
+          0: { cellWidth: 25 },
+          1: { cellWidth: 'auto' },
+          2: { cellWidth: 30 },
+          3: { cellWidth: 30, halign: 'right' },
+          4: { cellWidth: 20, textColor: [59, 130, 246] } // Blue text for link
+        },
+        didDrawCell: (data) => {
+            // Adicionar link clicável na coluna de comprovante
+            if (data.section === 'body' && data.column.index === 4) {
+                const rowIndex = data.row.index;
+                const originalUrl = filteredExpenses[rowIndex].receiptUrl;
+                if (originalUrl) {
+                    doc.link(data.cell.x, data.cell.y, data.cell.width, data.cell.height, { url: originalUrl });
+                }
+            }
+        }
+      });
+
+      const inicio = startDate || 'inicio';
+      const fim = endDate || 'fim';
+      doc.save(`nomad_relatorio_${inicio}_ate_${fim}.pdf`);
+
+    } catch (error) {
+      console.error("Erro ao gerar PDF:", error);
+      alert("Erro ao gerar PDF. Verifique se o bloqueador de popups está desativado.");
     }
   };
 
@@ -159,7 +254,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
                         type="date" 
                         value={startDate}
                         onChange={(e) => setStartDate(e.target.value)}
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-emerald-500 outline-none placeholder-zinc-600"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-emerald-500 outline-none placeholder-zinc-600 appearance-none"
                     />
                 </div>
                 <div className="flex items-center text-zinc-600">até</div>
@@ -168,7 +263,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
                         type="date" 
                         value={endDate}
                         onChange={(e) => setEndDate(e.target.value)}
-                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-emerald-500 outline-none placeholder-zinc-600"
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-emerald-500 outline-none placeholder-zinc-600 appearance-none"
                     />
                 </div>
             </div>
@@ -177,24 +272,35 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
         {/* Total Card */}
         <div className="bg-gradient-to-br from-zinc-800 to-zinc-900 rounded-2xl p-6 border border-zinc-700/50 shadow-xl relative overflow-hidden">
           <div className="absolute right-0 top-0 p-24 bg-emerald-500/10 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none" />
-          <div className="relative z-10 flex justify-between items-end">
-             <div>
+          <div className="relative z-10 flex flex-col sm:flex-row justify-between items-end gap-4">
+             <div className="w-full">
                 <p className="text-xs font-medium text-zinc-400 uppercase tracking-widest mb-1">Total no Período</p>
                 <h2 className="text-3xl font-bold text-white tracking-tight">
                 {formatCurrency(totalSpent)}
                 </h2>
              </div>
              
-             {/* Botão de Exportar */}
-             <button 
-                onClick={generateCSV}
-                className="p-3 bg-zinc-700/50 hover:bg-zinc-700 text-emerald-400 rounded-xl border border-zinc-600/50 transition-all flex items-center gap-2 active:scale-95 cursor-pointer"
-                title="Baixar Relatório Excel"
-                type="button"
-             >
-                <Download className="w-5 h-5" />
-                <span className="text-xs font-medium hidden sm:inline">CSV</span>
-             </button>
+             {/* Grupo de Botões de Exportar */}
+             <div className="flex gap-2 w-full sm:w-auto">
+                 <button 
+                    onClick={generateCSV}
+                    className="flex-1 sm:flex-none justify-center p-2.5 bg-zinc-700/50 hover:bg-zinc-700 text-emerald-400 rounded-xl border border-zinc-600/50 transition-all flex items-center gap-2 active:scale-95 cursor-pointer"
+                    title="Baixar Relatório Excel"
+                    type="button"
+                 >
+                    <Download className="w-4 h-4" />
+                    <span className="text-xs font-medium">CSV</span>
+                 </button>
+                 <button 
+                    onClick={generatePDF}
+                    className="flex-1 sm:flex-none justify-center p-2.5 bg-zinc-700/50 hover:bg-zinc-700 text-red-400 rounded-xl border border-zinc-600/50 transition-all flex items-center gap-2 active:scale-95 cursor-pointer"
+                    title="Baixar Relatório PDF"
+                    type="button"
+                 >
+                    <FileText className="w-4 h-4" />
+                    <span className="text-xs font-medium">PDF</span>
+                 </button>
+             </div>
           </div>
         </div>
       </header>
