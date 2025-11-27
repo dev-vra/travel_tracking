@@ -27,6 +27,7 @@ export interface CategorySummary {
   name: string;
   value: number;
   color: string;
+  [key: string]: any;
 }
 
 export type ViewState = 'AUTH' | 'DASHBOARD' | 'ADD_EXPENSE';

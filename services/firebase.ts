@@ -5,6 +5,7 @@ import {
   createUserWithEmailAndPassword, 
   signOut, 
   onAuthStateChanged,
+  sendPasswordResetEmail,
   User 
 } from 'firebase/auth';
 import { 
@@ -27,25 +28,35 @@ import { Expense } from '../types';
 // ------------------------------------------------------------------
 // FIREBASE CONFIGURATION
 // ------------------------------------------------------------------
-// Replace the values below with your specific Firebase Project keys.
-// In a real production environment, use process.env.REACT_APP_...
-// ------------------------------------------------------------------
 const firebaseConfig = {
   apiKey: "AIzaSyAve6hLiLopNpGis3vwS3Sf_q9mknXwjJ8",
   authDomain: "travel-cust.firebaseapp.com",
   projectId: "travel-cust",
-  storageBucket: "travel-cust.firebasestorage.app",
+  storageBucket: "travel-cust.appspot.com", 
   messagingSenderId: "264357373802",
   appId: "1:264357373802:web:78e1570b2cdac770bb6713"
 };
 
-// Initialize Firebase
-// Note: This will throw errors in the console if keys are invalid, 
-// but allows the UI to render for the prototype structure.
 const app = initializeApp(firebaseConfig);
 export const auth = getAuth(app);
 export const db = getFirestore(app);
 export const storage = getStorage(app);
+
+// Helper para Timeout (Evita loading infinito em caso de erro de CORS/Rede)
+const withTimeout = <T>(promise: Promise<T>, ms: number, errorMsg: string): Promise<T> => {
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(errorMsg)), ms);
+        promise
+            .then((res) => {
+                clearTimeout(timer);
+                resolve(res);
+            })
+            .catch((err) => {
+                clearTimeout(timer);
+                reject(err);
+            });
+    });
+};
 
 // ------------------------------------------------------------------
 // AUTH SERVICES
@@ -60,6 +71,15 @@ export const logoutUser = async () => {
     await signOut(auth);
   } catch (error) {
     console.error("Error signing out", error);
+    throw error;
+  }
+};
+
+export const resetPassword = async (email: string) => {
+  try {
+    await sendPasswordResetEmail(auth, email);
+  } catch (error) {
+    console.error("Error sending reset email", error);
     throw error;
   }
 };
@@ -83,13 +103,11 @@ export const getUserExpenses = async (uid: string): Promise<Expense[]> => {
     const q = query(
       collection(db, 'expenses'),
       where("uid", "==", uid),
-      orderBy("date", "desc") // Requires a composite index in Firestore occasionally
+      orderBy("date", "desc")
     );
     
-    // Fallback if index is missing, remove orderBy for initial test
-    // const q = query(collection(db, 'expenses'), where("uid", "==", uid));
-
     const querySnapshot = await getDocs(q);
+    
     const expenses: Expense[] = [];
     querySnapshot.forEach((doc) => {
       expenses.push({ id: doc.id, ...doc.data() } as Expense);
@@ -97,8 +115,18 @@ export const getUserExpenses = async (uid: string): Promise<Expense[]> => {
     return expenses;
   } catch (error) {
     console.error("Error fetching expenses: ", error);
-    // Return empty array to not crash UI on permission/config error
-    return [];
+    // Se falhar o indice composto, tenta query simples como fallback
+    try {
+        const qSimple = query(collection(db, 'expenses'), where("uid", "==", uid));
+        const snap = await getDocs(qSimple);
+        const expenses: Expense[] = [];
+        snap.forEach((doc) => {
+            expenses.push({ id: doc.id, ...doc.data() } as Expense);
+        });
+        return expenses;
+    } catch (e) {
+        return [];
+    }
   }
 };
 
@@ -109,7 +137,14 @@ export const getUserExpenses = async (uid: string): Promise<Expense[]> => {
 export const uploadReceipt = async (file: File, uid: string): Promise<string> => {
   try {
     const fileRef = ref(storage, `receipts/${uid}/${Date.now()}_${file.name}`);
-    await uploadBytes(fileRef, file);
+    
+    // Timeout de 15s para Upload.
+    await withTimeout(
+        uploadBytes(fileRef, file),
+        15000,
+        "TIMEOUT_UPLOAD"
+    );
+    
     const downloadURL = await getDownloadURL(fileRef);
     return downloadURL;
   } catch (error) {

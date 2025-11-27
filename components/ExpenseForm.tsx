@@ -3,7 +3,7 @@ import { Button } from './Button';
 import { Input, Select } from './Input';
 import { ExpenseCategory, Currency } from '../types';
 import { addExpenseToFirestore, uploadReceipt } from '../services/firebase';
-import { ArrowLeft, Upload, Camera, CheckCircle2, X } from 'lucide-react';
+import { ArrowLeft, Camera, CheckCircle2, X, AlertCircle } from 'lucide-react';
 
 interface ExpenseFormProps {
   uid: string;
@@ -19,32 +19,66 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
   const [category, setCategory] = useState<ExpenseCategory>(ExpenseCategory.FOOD);
   const [file, setFile] = useState<File | null>(null);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
+    setError(null);
 
     try {
       let receiptUrl = '';
+      
+      // Lógica de Upload com tratamento de falha parcial
       if (file) {
-        receiptUrl = await uploadReceipt(file, uid);
+        try {
+            receiptUrl = await uploadReceipt(file, uid);
+        } catch (uploadErr: any) {
+            console.error("Upload failed", uploadErr);
+            
+            // Tratamento específico de erros conhecidos
+            if (uploadErr.code === 'storage/unauthorized') {
+                throw new Error("Permissão negada no Storage. Vá em Firebase Console > Storage > Rules e mude para 'allow read, write: if true;'");
+            }
+
+            if (uploadErr.message === "TIMEOUT_UPLOAD" || uploadErr.code === 'storage/retry-limit-exceeded') {
+                const prosseguir = window.confirm(
+                    "O upload da imagem está demorando muito. Deseja salvar a despesa SEM o comprovante?"
+                );
+                if (!prosseguir) {
+                    throw new Error("Upload cancelado.");
+                }
+                receiptUrl = ''; 
+            } else {
+                throw new Error("Falha ao enviar imagem: " + uploadErr.message);
+            }
+        }
       }
 
-      await addExpenseToFirestore({
-        uid,
-        description,
-        amount: parseFloat(amount),
-        currency,
-        date,
-        category,
-        receiptUrl,
-        createdAt: Date.now(),
-      });
+      // Lógica do Firestore
+      try {
+        await addExpenseToFirestore({
+            uid,
+            description,
+            amount: parseFloat(amount),
+            currency,
+            date,
+            category,
+            receiptUrl,
+            createdAt: Date.now(),
+        });
+      } catch (dbErr: any) {
+          console.error("Firestore failed", dbErr);
+          if (dbErr.code === 'permission-denied') {
+            throw new Error("Permissão negada no Banco de Dados. Verifique as Regras do Firestore.");
+          }
+          throw new Error("Falha ao salvar dados. Verifique sua conexão.");
+      }
 
       onSuccess();
-    } catch (error) {
-      console.error(error);
-      alert('Failed to save expense. Check console.');
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message || "Erro ao salvar despesa. Tente novamente.");
     } finally {
       setLoading(false);
     }
@@ -66,7 +100,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
         >
           <ArrowLeft className="w-6 h-6" />
         </button>
-        <h2 className="text-lg font-semibold text-white">New Expense</h2>
+        <h2 className="text-lg font-semibold text-white">Nova Despesa</h2>
       </div>
 
       <div className="flex-1 overflow-y-auto p-6 pb-32">
@@ -74,8 +108,8 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
           
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 space-y-6">
             <Input
-              label="What did you buy?"
-              placeholder="e.g. Dinner at Mario's"
+              label="O que você comprou?"
+              placeholder="ex: Jantar no Mario's"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               required
@@ -84,7 +118,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
             <div className="flex gap-4">
               <div className="flex-[2]">
                 <Input
-                  label="Amount"
+                  label="Valor"
                   type="number"
                   step="0.01"
                   placeholder="0.00"
@@ -95,7 +129,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
               </div>
               <div className="flex-1">
                 <Select
-                  label="Currency"
+                  label="Moeda"
                   value={currency}
                   onChange={(e) => setCurrency(e.target.value as Currency)}
                   options={[
@@ -108,7 +142,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
             </div>
 
             <Input
-              label="Date"
+              label="Data"
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
@@ -116,7 +150,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
             />
 
             <Select
-              label="Category"
+              label="Categoria"
               value={category}
               onChange={(e) => setCategory(e.target.value as ExpenseCategory)}
               options={Object.values(ExpenseCategory).map(cat => ({ value: cat, label: cat }))}
@@ -126,7 +160,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
           {/* Receipt Upload */}
           <div className="space-y-2">
              <label className="text-xs font-semibold text-zinc-400 uppercase tracking-wider ml-1">
-                Receipt (Optional)
+                Comprovante (Opcional)
             </label>
             <div className="relative group">
               <input
@@ -148,7 +182,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
                     <CheckCircle2 className="w-8 h-8 text-emerald-500" />
                     <div className="text-center">
                       <p className="text-sm font-medium text-emerald-400">{file.name}</p>
-                      <p className="text-xs text-emerald-500/60 mt-1">Click to change</p>
+                      <p className="text-xs text-emerald-500/60 mt-1">Clique para alterar</p>
                     </div>
                   </>
                 ) : (
@@ -157,8 +191,8 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
                       <Camera className="w-6 h-6" />
                     </div>
                     <div className="text-center">
-                      <p className="text-sm text-zinc-300">Tap to snap a photo</p>
-                      <p className="text-xs text-zinc-500 mt-1">or select from gallery</p>
+                      <p className="text-sm text-zinc-300">Toque para fotografar</p>
+                      <p className="text-xs text-zinc-500 mt-1">ou selecione da galeria</p>
                     </div>
                   </>
                 )}
@@ -170,10 +204,17 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
                 onClick={() => setFile(null)}
                 className="text-xs text-red-400 flex items-center gap-1 hover:text-red-300 ml-1"
               >
-                <X className="w-3 h-3" /> Remove receipt
+                <X className="w-3 h-3" /> Remover comprovante
               </button>
             )}
           </div>
+          
+          {error && (
+            <div className="p-3 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center gap-3">
+                <AlertCircle className="w-5 h-5 text-red-500 shrink-0" />
+                <p className="text-sm text-red-200">{error}</p>
+            </div>
+          )}
 
         </form>
       </div>
@@ -185,7 +226,7 @@ export const ExpenseForm: React.FC<ExpenseFormProps> = ({ uid, onBack, onSuccess
               form="expense-form" 
               isLoading={loading}
             >
-              Save Expense
+              Salvar Despesa
             </Button>
          </div>
       </div>
