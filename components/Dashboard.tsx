@@ -3,9 +3,7 @@ import { User } from 'firebase/auth';
 import { logoutUser, getUserExpenses } from '../services/firebase';
 import { Expense, ExpenseCategory, CategorySummary } from '../types';
 import { PieChart, Pie, Cell, Tooltip } from 'recharts';
-import { LogOut, Plus, Wallet, Receipt, Calendar, Download, Loader2 } from 'lucide-react';
-import jsPDF from 'jspdf';
-import autoTable from 'jspdf-autotable';
+import { LogOut, Plus, Receipt, Calendar, Download, Loader2, FilterX } from 'lucide-react';
 
 interface DashboardProps {
   user: User;
@@ -22,6 +20,10 @@ const CATEGORY_COLORS: Record<string, string> = {
 export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
   const [expenses, setExpenses] = useState<Expense[]>([]);
   const [loading, setLoading] = useState(true);
+  
+  // Filtros de Data
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
 
   useEffect(() => {
     const fetchData = async () => {
@@ -34,11 +36,18 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
     fetchData();
   }, [user]);
 
-  // Calculations
-  const totalSpent = expenses.reduce((acc, curr) => acc + curr.amount, 0);
+  // Lógica de Filtragem (Comparação de string YYYY-MM-DD evita bugs de timezone)
+  const filteredExpenses = expenses.filter(expense => {
+    if (startDate && expense.date < startDate) return false;
+    if (endDate && expense.date > endDate) return false;
+    return true;
+  });
+
+  // Calculations baseados nos filtrados
+  const totalSpent = filteredExpenses.reduce((acc, curr) => acc + curr.amount, 0);
 
   const categoryData: CategorySummary[] = Object.values(ExpenseCategory).map(cat => {
-    const total = expenses
+    const total = filteredExpenses
       .filter(e => e.category === cat)
       .reduce((acc, curr) => acc + curr.amount, 0);
     return {
@@ -52,63 +61,69 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
     return new Intl.NumberFormat('pt-BR', { style: 'currency', currency: 'BRL' }).format(val);
   };
 
-  // Função para Gerar PDF
-  const generatePDF = () => {
-    if (expenses.length === 0) {
-      alert("Não há despesas cadastradas para gerar o relatório.");
-      return;
-    }
-
+  // Função para Gerar CSV (Excel) Robusta
+  const generateCSV = () => {
     try {
-      const doc = new jsPDF();
-      
-      // Header
-      doc.setFontSize(18);
-      doc.text("Relatório de Despesas - NomadLedger", 14, 22);
-      
-      doc.setFontSize(11);
-      doc.setTextColor(100);
-      doc.text(`Usuário: ${user.email}`, 14, 30);
-      doc.text(`Gerado em: ${new Date().toLocaleDateString('pt-BR')}`, 14, 36);
-      doc.text(`Total Gasto: ${formatCurrency(totalSpent)}`, 14, 42);
+        if (filteredExpenses.length === 0) {
+          alert("Não há despesas no período selecionado para exportar.");
+          return;
+        }
 
-      // Tabela
-      const tableData = expenses.map(exp => [
-          new Date(exp.date).toLocaleDateString('pt-BR'),
-          exp.description,
-          exp.category,
-          `${exp.currency} ${exp.amount.toFixed(2)}`,
-          exp.receiptUrl ? 'Link' : '-' // Placeholder para o link
-      ]);
+        const headers = ['Data', 'Descrição', 'Categoria', 'Valor', 'Moeda', 'Link Comprovante'];
+        const csvRows = [headers.join(';')];
 
-      autoTable(doc, {
-          head: [['Data', 'Descrição', 'Categoria', 'Valor', 'Comprovante']],
-          body: tableData,
-          startY: 50,
-          theme: 'grid',
-          headStyles: { fillColor: [16, 185, 129] }, // Emerald 500
-          didDrawCell: (data) => {
-              // Adicionar link clicável na coluna de Comprovante
-              if (data.section === 'body' && data.column.index === 4) {
-                  const expense = expenses[data.row.index];
-                  if (expense.receiptUrl) {
-                      doc.link(data.cell.x, data.cell.y, data.cell.width, data.cell.height, { url: expense.receiptUrl });
-                  }
-              }
-          }
-      });
+        for (const exp of filteredExpenses) {
+            // Formatação manual da data para DD/MM/AAAA para evitar que o new Date() 
+            // subtraia um dia devido ao fuso horário do navegador
+            const [ano, mes, dia] = exp.date.split('-');
+            const dataFormatada = `${dia}/${mes}/${ano}`;
+            
+            // Escapar aspas duplas na descrição
+            const descricaoSegura = `"${exp.description.replace(/"/g, '""')}"`;
 
-      doc.save(`relatorio_despesas_${new Date().toISOString().split('T')[0]}.pdf`);
+            const row = [
+                dataFormatada,
+                descricaoSegura,
+                exp.category,
+                exp.amount.toFixed(2).replace('.', ','), // Formato 10,50
+                exp.currency,
+                exp.receiptUrl || ''
+            ];
+            csvRows.push(row.join(';'));
+        }
+
+        // Adiciona BOM para o Excel reconhecer acentuação (UTF-8)
+        const csvString = csvRows.join('\n');
+        const blob = new Blob(['\uFEFF' + csvString], { type: 'text/csv;charset=utf-8;' });
+        
+        // Cria link de download
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `nomad_relatorio_${startDate || 'inicio'}_ate_${endDate || 'fim'}.csv`;
+        
+        document.body.appendChild(link);
+        link.click();
+        
+        // Limpeza
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
     } catch (error) {
-      console.error("Erro ao gerar PDF:", error);
-      alert("Erro ao gerar o PDF. Tente novamente.");
+        console.error("Erro ao gerar CSV:", error);
+        alert("Ocorreu um erro ao gerar o arquivo. Verifique o console para mais detalhes.");
     }
+  };
+
+  const clearFilters = () => {
+    setStartDate('');
+    setEndDate('');
   };
 
   return (
     <div className="flex flex-col h-screen bg-zinc-950 relative">
       {/* Header */}
-      <header className="px-6 pt-12 pb-6 bg-gradient-to-b from-zinc-900 to-zinc-950 border-b border-zinc-800">
+      <header className="px-6 pt-8 pb-6 bg-zinc-900 border-b border-zinc-800">
         <div className="flex justify-between items-start mb-6">
           <div>
             <h1 className="text-2xl font-bold text-white">Visão Geral</h1>
@@ -116,35 +131,69 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
           </div>
           <button 
             onClick={logoutUser}
-            className="p-2 bg-zinc-900 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-800 border border-zinc-800 transition-all"
+            className="p-2 bg-zinc-950 rounded-full text-zinc-400 hover:text-white hover:bg-zinc-800 border border-zinc-800 transition-all"
             aria-label="Sair"
           >
             <LogOut className="w-5 h-5" />
           </button>
         </div>
 
+        {/* Filtros de Data */}
+        <div className="bg-zinc-950/50 p-4 rounded-xl border border-zinc-800/50 mb-6 space-y-3">
+            <div className="flex items-center justify-between">
+                <span className="text-xs font-semibold text-zinc-500 uppercase tracking-wider flex items-center gap-1">
+                    <Calendar className="w-3 h-3" /> Período
+                </span>
+                {(startDate || endDate) && (
+                    <button 
+                        onClick={clearFilters}
+                        className="text-xs text-emerald-500 hover:text-emerald-400 flex items-center gap-1"
+                    >
+                        <FilterX className="w-3 h-3" /> Limpar Filtros
+                    </button>
+                )}
+            </div>
+            <div className="flex gap-3">
+                <div className="flex-1">
+                    <input 
+                        type="date" 
+                        value={startDate}
+                        onChange={(e) => setStartDate(e.target.value)}
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-emerald-500 outline-none placeholder-zinc-600"
+                    />
+                </div>
+                <div className="flex items-center text-zinc-600">até</div>
+                <div className="flex-1">
+                    <input 
+                        type="date" 
+                        value={endDate}
+                        onChange={(e) => setEndDate(e.target.value)}
+                        className="w-full bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-2 text-sm text-zinc-200 focus:ring-1 focus:ring-emerald-500 outline-none placeholder-zinc-600"
+                    />
+                </div>
+            </div>
+        </div>
+
         {/* Total Card */}
-        <div className="bg-zinc-900 rounded-2xl p-6 border border-zinc-800 shadow-xl shadow-black/50 relative overflow-hidden">
-          <div className="absolute right-0 top-0 p-32 bg-emerald-500/5 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none" />
+        <div className="bg-gradient-to-br from-zinc-800 to-zinc-900 rounded-2xl p-6 border border-zinc-700/50 shadow-xl relative overflow-hidden">
+          <div className="absolute right-0 top-0 p-24 bg-emerald-500/10 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none" />
           <div className="relative z-10 flex justify-between items-end">
              <div>
-                <p className="text-sm font-medium text-zinc-400 uppercase tracking-widest mb-1">Total Gasto</p>
-                <h2 className="text-4xl font-bold text-white tracking-tight">
+                <p className="text-xs font-medium text-zinc-400 uppercase tracking-widest mb-1">Total no Período</p>
+                <h2 className="text-3xl font-bold text-white tracking-tight">
                 {formatCurrency(totalSpent)}
                 </h2>
-                <div className="mt-4 flex items-center gap-2 text-xs text-emerald-400 bg-emerald-500/10 w-fit px-2 py-1 rounded-md">
-                    <Wallet className="w-3 h-3" />
-                    <span>Total Global (BRL)</span>
-                </div>
              </div>
              
              {/* Botão de Exportar */}
              <button 
-                onClick={generatePDF}
-                className="p-3 bg-zinc-800 hover:bg-zinc-700 text-zinc-300 rounded-xl border border-zinc-700 transition-all flex flex-col items-center gap-1 active:scale-95"
-                title="Baixar Relatório PDF"
+                onClick={generateCSV}
+                className="p-3 bg-zinc-700/50 hover:bg-zinc-700 text-emerald-400 rounded-xl border border-zinc-600/50 transition-all flex items-center gap-2 active:scale-95 cursor-pointer"
+                title="Baixar Relatório Excel"
+                type="button"
              >
                 <Download className="w-5 h-5" />
+                <span className="text-xs font-medium hidden sm:inline">CSV</span>
              </button>
           </div>
         </div>
@@ -154,12 +203,12 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
       <main className="flex-1 overflow-y-auto p-6 space-y-8 pb-32">
         
         {/* Chart Section (Donut Chart) */}
-        {categoryData.length > 0 && (
+        {categoryData.length > 0 ? (
           <div className="space-y-4">
              <h3 className="text-sm font-semibold text-zinc-500 uppercase tracking-wider">Detalhamento</h3>
              <div className="flex flex-col md:flex-row items-center gap-6 bg-zinc-900/50 p-6 rounded-2xl border border-zinc-800/50">
-                {/* Gráfico Donut com tamanho fixo para evitar erro de redimensionamento */}
-                <div className="h-48 w-48 shrink-0 relative flex items-center justify-center">
+                {/* Gráfico Donut com tamanho fixo */}
+                <div className="h-48 w-48 shrink-0 relative flex items-center justify-center mx-auto md:mx-0">
                    <PieChart width={192} height={192}>
                         <Pie
                           data={categoryData}
@@ -179,7 +228,6 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
                             itemStyle={{ color: '#f4f4f5' }}
                         />
                    </PieChart>
-                   {/* Texto no meio do Donut */}
                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                       <span className="text-xs font-semibold text-zinc-500">CATEGORIAS</span>
                    </div>
@@ -199,24 +247,34 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
                 </div>
              </div>
           </div>
+        ) : (
+            <div className="p-6 text-center border border-dashed border-zinc-800 rounded-2xl">
+                <p className="text-zinc-500 text-sm">Nenhum dado para o gráfico neste período.</p>
+            </div>
         )}
 
         {/* Recent List */}
         <div className="space-y-4">
-           <h3 className="text-sm font-semibold text-zinc-500 uppercase tracking-wider">Transações Recentes</h3>
+           <h3 className="text-sm font-semibold text-zinc-500 uppercase tracking-wider">
+               {startDate || endDate ? 'Transações Filtradas' : 'Todas Transações'}
+               <span className="ml-2 text-zinc-600 text-xs font-normal normal-case">
+                   ({filteredExpenses.length} itens)
+               </span>
+           </h3>
+           
            {loading ? (
              <div className="flex flex-col items-center justify-center py-10 text-zinc-600">
                <Loader2 className="w-6 h-6 animate-spin mb-2" />
                <p>Carregando dados...</p>
              </div>
-           ) : expenses.length === 0 ? (
+           ) : filteredExpenses.length === 0 ? (
              <div className="text-center py-10 border border-dashed border-zinc-800 rounded-xl">
                <Receipt className="w-8 h-8 text-zinc-600 mx-auto mb-2" />
-               <p className="text-zinc-500">Nenhuma despesa ainda.</p>
+               <p className="text-zinc-500">Nenhuma despesa encontrada.</p>
              </div>
            ) : (
              <div className="space-y-3">
-               {expenses.map((expense) => (
+               {filteredExpenses.map((expense) => (
                  <div key={expense.id} className="group flex items-center justify-between p-4 bg-zinc-900 border border-zinc-800 rounded-xl hover:border-emerald-500/30 transition-colors">
                     <div className="flex flex-col gap-1">
                       <span className="font-medium text-zinc-200">{expense.description}</span>
@@ -226,7 +284,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ user, onAddExpense }) => {
                         </span>
                         <span className="flex items-center gap-1">
                           <Calendar className="w-3 h-3" />
-                          {new Date(expense.date).toLocaleDateString('pt-BR')}
+                          {/* Conversão manual para evitar erro de Timezone no display */}
+                          {expense.date.split('-').reverse().join('/')}
                         </span>
                       </div>
                     </div>
