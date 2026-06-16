@@ -1,0 +1,231 @@
+// Schema de dados do GeoMatrícula (§12 da especificação).
+// PostGIS habilitado para a camada espacial (M4).
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [postgis]
+}
+
+// ---------- Enums ----------
+
+enum StatusMatricula {
+  RECEBIDA // upload feito, aguardando processamento
+  PROCESSANDO // pipeline em execução
+  CONCLUIDA // análise pronta
+  ERRO
+}
+
+enum TipoImovel {
+  URBANO
+  RURAL
+  NAO_IDENTIFICADO
+}
+
+enum TipoPessoa {
+  FISICA
+  JURIDICA
+}
+
+enum TipoAto {
+  REGISTRO // R-
+  AVERBACAO // Av-
+}
+
+// Natureza do ato registral (semântica registral).
+enum NaturezaAto {
+  ABERTURA
+  COMPRA_VENDA
+  DOACAO
+  HERANCA_PARTILHA
+  PERMUTA
+  INTEGRALIZACAO
+  HIPOTECA
+  ALIENACAO_FIDUCIARIA
+  PENHORA
+  ARRESTO
+  USUFRUTO
+  INDISPONIBILIDADE
+  CLAUSULA_RESTRITIVA // inalienabilidade, incomunicabilidade, impenhorabilidade
+  CANCELAMENTO // baixa de ônus / cancelamento de ato
+  CONSTRUCAO
+  GEORREFERENCIAMENTO
+  RETIFICACAO
+  OUTRO
+}
+
+enum TipoOnus {
+  HIPOTECA
+  ALIENACAO_FIDUCIARIA
+  PENHORA
+  ARRESTO
+  USUFRUTO
+  INDISPONIBILIDADE
+  CLAUSULA_RESTRITIVA
+}
+
+enum IndiceTipo {
+  NEGOCIABILIDADE
+  REGULARIDADE_REGISTRAL
+  CONFORMIDADE_GEO
+  RISCO_LITIGIO
+  ELEGIBILIDADE_REURB
+}
+
+enum FaixaSemaforo {
+  VERDE
+  AMARELO
+  VERMELHO
+}
+
+// ---------- Modelos ----------
+
+model Matricula {
+  id         String          @id @default(cuid())
+  numero     String?
+  cartorio   String?
+  comarca    String?
+  uf         String?
+  textoBruto String          @db.Text
+  status     StatusMatricula @default(RECEBIDA)
+  erro       String?
+  acervoId   String?
+  acervo     Acervo?         @relation(fields: [acervoId], references: [id])
+  createdAt  DateTime        @default(now())
+  updatedAt  DateTime        @updatedAt
+
+  imovel        Imovel?
+  atos          AtoRegistral[]
+  proprietarios Proprietario[]
+  onus          Onus[]
+  scores        Score[]
+  dossie        Dossie?
+  auditoria     AuditLog[]
+
+  @@index([status])
+  @@index([acervoId])
+}
+
+model Imovel {
+  id          String     @id @default(cuid())
+  matriculaId String     @unique
+  matricula   Matricula  @relation(fields: [matriculaId], references: [id], onDelete: Cascade)
+  tipo        TipoImovel @default(NAO_IDENTIFICADO)
+  descricao   String?    @db.Text
+  areaM2      Float?
+  logradouro  String?
+  municipio   String?
+  uf          String?
+  // Camada espacial (M4) — gerenciada via SQL bruto / GDAL.
+  geom        Unsupported("geometry(Geometry, 4326)")?
+}
+
+model Proprietario {
+  id          String     @id @default(cuid())
+  matriculaId String
+  matricula   Matricula  @relation(fields: [matriculaId], references: [id], onDelete: Cascade)
+  nome        String
+  documento   String?
+  tipoPessoa  TipoPessoa @default(FISICA)
+  estadoCivil String?
+  fracao      String?
+  atual       Boolean    @default(false) // titular de hoje (saída do M3)
+  origemAto   String? // código do ato que originou a titularidade (ex: R-3)
+
+  @@index([matriculaId])
+}
+
+model AtoRegistral {
+  id            String      @id @default(cuid())
+  matriculaId   String
+  matricula     Matricula   @relation(fields: [matriculaId], references: [id], onDelete: Cascade)
+  tipo          TipoAto
+  ordem         Int
+  codigo        String // ex: "R-1", "Av-2"
+  natureza      NaturezaAto @default(OUTRO)
+  data          DateTime?
+  conteudo      String      @db.Text
+  cancelado     Boolean     @default(false)
+  cancelaCodigo String? // código do ato cancelado por este (quando natureza=CANCELAMENTO)
+
+  @@index([matriculaId])
+}
+
+model Onus {
+  id          String    @id @default(cuid())
+  matriculaId String
+  matricula   Matricula @relation(fields: [matriculaId], references: [id], onDelete: Cascade)
+  tipo        TipoOnus
+  ativo       Boolean   @default(true)
+  credor      String?
+  valor       Float?
+  origemAto   String? // código do ato que constituiu o ônus
+
+  @@index([matriculaId])
+}
+
+model Score {
+  id          String        @id @default(cuid())
+  matriculaId String
+  matricula   Matricula     @relation(fields: [matriculaId], references: [id], onDelete: Cascade)
+  indice      IndiceTipo
+  valor       Int // 0–100
+  faixa       FaixaSemaforo
+  drivers     Json // fatores explicáveis [{ fator, peso, pontos, nota }]
+  createdAt   DateTime      @default(now())
+
+  @@unique([matriculaId, indice])
+  @@index([matriculaId])
+}
+
+model Dossie {
+  id          String    @id @default(cuid())
+  matriculaId String    @unique
+  matricula   Matricula @relation(fields: [matriculaId], references: [id], onDelete: Cascade)
+  resumo      String    @db.Text
+  conteudo    Json // dossiê estruturado
+  markdown    String    @db.Text
+  createdAt   DateTime  @default(now())
+}
+
+model AuditLog {
+  id          String     @id @default(cuid())
+  matriculaId String?
+  matricula   Matricula? @relation(fields: [matriculaId], references: [id], onDelete: SetNull)
+  acao        String
+  ator        String     @default("sistema")
+  detalhe     Json?
+  createdAt   DateTime   @default(now())
+
+  @@index([matriculaId])
+}
+
+// Acervo (M7) — agrupamento de matrículas para diagnóstico em lote.
+model Acervo {
+  id          String      @id @default(cuid())
+  nome        String
+  descricao   String?
+  municipio   String?
+  uf          String?
+  createdAt   DateTime    @default(now())
+  matriculas  Matricula[]
+}
+
+// Motor normativo (M8) — regra como dado (rules-as-data).
+model RegraLocal {
+  id         String   @id @default(cuid())
+  municipio  String
+  uf         String
+  dispositivo String // ex: "Lei Municipal 123/2020, art. 5º"
+  parametros Json // ex: { loteMinimoM2: 125, coefAproveitamento: 1.5 }
+  vigenciaIni DateTime?
+  vigenciaFim DateTime?
+  ativo      Boolean  @default(false) // só aplica após revisão humana
+  createdAt  DateTime @default(now())
+
+  @@index([municipio, uf])
+}
